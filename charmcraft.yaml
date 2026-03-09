@@ -1,0 +1,162 @@
+name: flowise
+type: charm
+title: Flowise AI
+summary: Visual drag-and-drop LLM flow builder for Kubeflow
+description: |
+  Flowise is an open-source, low-code platform for building AI agents and LLM
+  workflows through a visual drag-and-drop interface. This charm packages Flowise
+  for deployment alongside Charmed Kubeflow, integrating it into the Kubeflow
+  Dashboard sidebar so users can access it directly from their ML workspace.
+
+  Features:
+  - Visual LLM workflow builder powered by LangChain
+  - Drag-and-drop interface for building AI agents
+  - Integrated into Kubeflow Dashboard sidebar navigation
+  - Persistent storage for flows, credentials, and chat history
+  - Configurable environment variables for API keys and settings
+
+bases:
+  - build-on:
+      - name: ubuntu
+        channel: "22.04"
+    run-on:
+      - name: ubuntu
+        channel: "22.04"
+
+containers:
+  flowise:
+    resource: oci-image
+
+resources:
+  oci-image:
+    type: oci-image
+    description: OCI image for Flowise
+    upstream-source: flowiseai/flowise:latest
+
+requires:
+  # Relation to appear in the Kubeflow Dashboard sidebar
+  links:
+    interface: kubeflow_dashboard_links
+
+  # Istio ingress for routing within Kubeflow (auto-creates VirtualService)
+  ingress:
+    interface: ingress
+    limit: 1
+    schema: https://raw.githubusercontent.com/canonical/operator-schemas/master/ingress.yaml
+    versions: [v2, v1]
+
+  # Database for persistent storage (MySQL or PostgreSQL)
+  relational-db:
+    interface: mysql_client
+    optional: true
+
+  # S3-compatible object storage (MinIO or AWS S3)
+  object-storage:
+    interface: s3
+    optional: true
+
+  # Redis for queue mode and caching
+  redis:
+    interface: redis
+    optional: true
+
+storage:
+  flowise-data:
+    type: filesystem
+    location: /root/.flowise
+    minimum-size: 1G
+
+config:
+  options:
+    port:
+      type: int
+      default: 3000
+      description: Port Flowise listens on inside the container.
+    flowise-username:
+      type: string
+      default: ""
+      description: |
+        Username for Flowise basic auth. Leave empty to disable auth
+        (Kubeflow handles auth via Istio/Dex).
+    flowise-password:
+      type: string
+      default: ""
+      description: Password for Flowise basic auth.
+    flowise-secretkey-overwrite:
+      type: string
+      default: ""
+      description: |
+        Secret key used to encrypt/decrypt credentials stored in the database.
+        If not set, Flowise generates a random one (lost on restart).
+    log-level:
+      type: string
+      default: info
+      description: "Log level: error, info, verbose, debug"
+    debug:
+      type: boolean
+      default: false
+      description: Enable debug mode (prints more console logs).
+    cors-origins:
+      type: string
+      default: "*"
+      description: |
+        Allowed origins for CORS. Use comma-separated values for multiple origins.
+        Example: "https://example.com,https://app.example.com"
+    iframe-origins:
+      type: string
+      default: "*"
+      description: |
+        Allowed origins for iframe embedding. Use comma-separated values.
+    file-size-limit:
+      type: string
+      default: "50mb"
+      description: Maximum file upload size (e.g., "50mb", "100mb").
+    number-of-proxies:
+      type: int
+      default: 1
+      description: Number of proxies in front of Flowise (for rate limiting).
+    show-community-nodes:
+      type: boolean
+      default: true
+      description: Show community-created nodes in the UI.
+    disable-telemetry:
+      type: boolean
+      default: false
+      description: Disable Flowise telemetry.
+    queue-mode:
+      type: boolean
+      default: false
+      description: |
+        Enable queue mode for distributed processing.
+        Requires Redis relation to be configured.
+    worker-concurrency:
+      type: int
+      default: 10
+      description: Number of concurrent workers when queue mode is enabled.
+    disabled-nodes:
+      type: string
+      default: ""
+      description: |
+        Comma-separated list of node names to disable.
+        Example: "chatOpenAI,openAIEmbeddings"
+    trusted-auth-header:
+      type: string
+      default: "kubeflow-userid"
+      description: |
+        HTTP header that carries the authenticated user identity.
+        Set by Istio/Dex in Kubeflow. Flowise uses this to trust
+        the upstream authentication.
+    base-path:
+      type: string
+      default: "/flowise"
+      description: |
+        Base URL path for Flowise behind a reverse proxy.
+        Must match the Istio VirtualService prefix (without trailing slash).
+    extra-env:
+      type: string
+      default: ""
+      description: |
+        Extra environment variables as KEY=VALUE pairs, one per line.
+        Example:
+          OPENAI_API_KEY=sk-xxx
+          LANGCHAIN_TRACING_V2=true

@@ -1,0 +1,8 @@
+*.charm
+*:Zone.Identifier
+__pycache__/
+*.pyc
+.tox/
+build/
+staging-venv/
+venv/

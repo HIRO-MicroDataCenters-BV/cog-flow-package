@@ -1,0 +1,46 @@
+# These manifests route Flowise through the Kubeflow Istio gateway.
+# Apply them if you are NOT using the istio-pilot ingress relation,
+# or if you need manual control over routing.
+#
+# Usage:
+#   kubectl apply -f k8s-manifests.yaml -n kubeflow
+
+---
+apiVersion: networking.istio.io/v1beta1
+kind: VirtualService
+metadata:
+  name: flowise
+  namespace: kubeflow
+spec:
+  gateways:
+    - kubeflow-gateway
+  hosts:
+    - "*"
+  http:
+    - match:
+        - uri:
+            prefix: /flowise/
+      rewrite:
+        uri: /
+      route:
+        - destination:
+            host: flowise.kubeflow.svc.cluster.local
+            port:
+              number: 3000
+
+---
+apiVersion: security.istio.io/v1beta1
+kind: AuthorizationPolicy
+metadata:
+  name: flowise
+  namespace: kubeflow
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: flowise
+  rules:
+    - from:
+        - source:
+            namespaces:
+              - istio-system        # Allow traffic from the Istio ingress gateway
+              - kubeflow            # Allow traffic from other Kubeflow services
