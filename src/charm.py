@@ -99,6 +99,9 @@ class FlowiseCharm(CharmBase):
         # --- Redis relation events ---
         self.framework.observe(self.on.redis_relation_updated, self._on_redis_relation_updated)
 
+        # --- Cog API info relation events ---
+        self.framework.observe(self.on.cog_api_info_relation_changed, self._on_cog_api_info_changed)
+
     # -----------------------------------------------------------------
     # Helpers
     # -----------------------------------------------------------------
@@ -223,6 +226,29 @@ class FlowiseCharm(CharmBase):
             "REDIS_PORT": port,
         }
 
+    def _get_cog_api_path(self) -> str:
+        """Get the Cog API base path from the cog-api-info relation.
+
+        Returns empty string if relation is not established or data unavailable.
+        """
+        interfaces = self._get_interfaces()
+        cog_api_info = interfaces.get("cog-api-info")
+        if not cog_api_info:
+            return ""
+
+        try:
+            data = cog_api_info.get_data()
+            if not data:
+                return ""
+            api_info = list(data.values())[0]
+            base_path = api_info.get("base-path", "")
+            if base_path:
+                logger.info("Got Cog API base-path from relation: %s", base_path)
+            return base_path
+        except Exception as err:
+            logger.warning("Error reading cog-api-info relation: %s", err)
+            return ""
+
     def _flowise_environment(self) -> dict:
         """Build the environment dict for the Flowise container.
 
@@ -318,6 +344,11 @@ class FlowiseCharm(CharmBase):
         secret_key = self.config.get("flowise-secretkey-overwrite", "")
         if secret_key:
             env["SECRETKEY_OVERWRITE"] = secret_key
+
+        # --- Cog API path (from relation) ---
+        cog_api_path = self._get_cog_api_path()
+        if cog_api_path:
+            env["COG_API_PATH"] = cog_api_path
 
         # --- Parse extra-env (newline-separated KEY=VALUE pairs) ---
         extra = self.config.get("extra-env", "")
@@ -436,6 +467,11 @@ class FlowiseCharm(CharmBase):
     def _on_redis_relation_updated(self, event: RedisRelationUpdatedEvent):
         """Handle Redis relation update: reconfigure Flowise for queue mode."""
         logger.info("Redis relation updated")
+        self._update_layer()
+
+    def _on_cog_api_info_changed(self, event):
+        """Handle cog-api-info relation change: update Cog API path."""
+        logger.info("Cog API info relation changed")
         self._update_layer()
 
 

@@ -60,6 +60,21 @@ requires:
     interface: redis
     optional: true
 
+  # Cog API info - receives the API base path from cog-api charm
+  cog-api-info:
+    interface: cog-api-info
+    optional: true
+    schema:
+      v1:
+        provides:
+          type: object
+          properties:
+            base-path:
+              type: string
+          required:
+          - base-path
+    versions: [v1]
+
 storage:
   flowise-data:
     type: filesystem
