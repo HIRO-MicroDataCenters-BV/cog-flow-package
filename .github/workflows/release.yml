@@ -1,0 +1,120 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag name (e.g. v0.1.0)"
+        required: true
+
+concurrency:
+  group: release-${{ github.workflow }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
+
+      - name: Install charmcraft
+        run: sudo snap install charmcraft --classic --channel 3.x/stable
+
+      - name: Install charm build-packages
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -m pip install --quiet pyyaml
+          pkgs=$(python3 -c '
+          import yaml
+          d = yaml.safe_load(open("charmcraft.yaml"))
+          out = []
+          for part in (d.get("parts") or {}).values():
+              for p in part.get("build-packages", []):
+                  out.append(p)
+          print(" ".join(out))
+          ')
+          if [ -n "$pkgs" ]; then
+            echo "Installing build-packages: $pkgs"
+            sudo apt-get update
+            sudo apt-get install -y $pkgs
+          else
+            echo "No build-packages declared in charmcraft.yaml"
+          fi
+
+      - name: Pack charm
+        run: charmcraft pack --destructive-mode --verbose
+
+      - name: Find built charm
+        id: find
+        shell: bash
+        run: |
+          shopt -s nullglob
+          charms=( *.charm )
+
+          if [ "${#charms[@]}" -ne 1 ]; then
+            echo "Expected exactly one .charm artifact, found ${#charms[@]}: ${charms[*]}" >&2
+            exit 1
+          fi
+
+          echo "file=${charms[0]}" >> "$GITHUB_OUTPUT"
+
+      - name: Attach .charm to GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.event.inputs.tag || github.ref_name }}
+          files: ${{ steps.find.outputs.file }}
+          generate_release_notes: true
+          fail_on_unmatched_files: true
+
+      - name: Publish to Charmhub (edge)
+        env:
+          CHARMCRAFT_AUTH: ${{ secrets.CHARMHUB_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          python3 -m pip install --quiet pyyaml
+
+          python3 -c '
+          import yaml
+          d = yaml.safe_load(open("charmcraft.yaml"))
+          print("NAME\t" + d["name"])
+          for n, s in (d.get("resources") or {}).items():
+              if s.get("type") == "oci-image":
+                  print("RES\t" + n + "\t" + s["upstream-source"])
+          ' > /tmp/meta
+
+          CHARM_NAME=$(awk -F'\t' '$1=="NAME"{print $2}' /tmp/meta)
+          echo "Charm name: $CHARM_NAME"
+
+          get_revision() { python3 -c 'import json,sys; print(json.load(sys.stdin)["revision"])'; }
+
+          RESOURCE_ARGS=()
+          while IFS=$'\t' read -r _ name image; do
+            echo "::group::Upload resource $name from $image"
+            docker pull "$image"
+            image_id=$(docker inspect --format='{{.Id}}' "$image")
+            echo "image id: $image_id"
+            rev=$(charmcraft upload-resource "$CHARM_NAME" "$name" --image "$image_id" --format=json | get_revision)
+            echo "resource $name -> revision $rev"
+            RESOURCE_ARGS+=(--resource "$name:$rev")
+            echo "::endgroup::"
+          done < <(awk -F'\t' '$1=="RES"' /tmp/meta)
+
+          echo "::group::Upload charm"
+          CHARM_REV=$(charmcraft upload "${{ steps.find.outputs.file }}" --format=json | get_revision)
+          echo "charm revision: $CHARM_REV"
+          echo "::endgroup::"
+
+          echo "::group::Release $CHARM_NAME rev $CHARM_REV to latest/edge"
+          charmcraft release "$CHARM_NAME" -r "$CHARM_REV" --channel=latest/edge "${RESOURCE_ARGS[@]}"
+          echo "::endgroup::"
