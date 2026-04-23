@@ -1,0 +1,112 @@
+name: Refresh OCI resource
+
+on:
+  repository_dispatch:
+    types: [source-image-refresh]
+
+concurrency:
+  group: charmhub-${{ github.event.client_payload.branch }}
+  cancel-in-progress: false
+
+jobs:
+  refresh:
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Install charmcraft
+        run: sudo snap install charmcraft --classic --channel 3.x/stable
+
+      - name: Map branch to channel
+        id: chan
+        shell: bash
+        run: |
+          case "${{ github.event.client_payload.branch }}" in
+            main)    echo "channel=latest/stable" >> "$GITHUB_OUTPUT" ;;
+            develop) echo "channel=latest/edge"   >> "$GITHUB_OUTPUT" ;;
+            *) echo "Unsupported branch: ${{ github.event.client_payload.branch }}" >&2; exit 1 ;;
+          esac
+
+      - name: Pull image and resolve id
+        id: img
+        shell: bash
+        run: |
+          set -euo pipefail
+          IMAGE="${{ github.event.client_payload.image }}"
+          echo "Pulling $IMAGE"
+          docker pull "$IMAGE"
+          echo "id=$(docker inspect --format='{{.Id}}' "$IMAGE")" >> "$GITHUB_OUTPUT"
+
+      - name: Upload resource revision
+        id: upload
+        shell: bash
+        env:
+          CHARMCRAFT_AUTH: ${{ secrets.CHARMHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          python3 -m pip install --quiet pyyaml
+
+          CHARM=$(python3 -c 'import yaml; print(yaml.safe_load(open("charmcraft.yaml"))["name"])')
+          RES=$(python3 -c '
+          import yaml
+          d = yaml.safe_load(open("charmcraft.yaml"))
+          for n, s in (d.get("resources") or {}).items():
+              if s.get("type") == "oci-image":
+                  print(n); break')
+
+          if [ -z "$RES" ]; then
+            echo "No oci-image resource declared in charmcraft.yaml" >&2
+            exit 1
+          fi
+
+          echo "charm=$CHARM"  >> "$GITHUB_OUTPUT"
+          echo "resource=$RES" >> "$GITHUB_OUTPUT"
+
+          REV=$(charmcraft upload-resource "$CHARM" "$RES" \
+                  --image "${{ steps.img.outputs.id }}" --format=json \
+                | python3 -c 'import json,sys; print(json.load(sys.stdin)["revision"])')
+          echo "resource $RES -> revision $REV"
+          echo "rev=$REV" >> "$GITHUB_OUTPUT"
+
+      - name: Find current charm revision on target channel
+        id: currev
+        shell: bash
+        env:
+          CHARMCRAFT_AUTH: ${{ secrets.CHARMHUB_TOKEN }}
+          CHANNEL: ${{ steps.chan.outputs.channel }}
+          CHARM: ${{ steps.upload.outputs.charm }}
+        run: |
+          set -euo pipefail
+          REV=$(charmcraft status "$CHARM" --format=json | python3 - <<'PY'
+          import json, os, sys
+          channel = os.environ["CHANNEL"]
+          data = json.load(sys.stdin)
+          for track in data:
+              for mapping in track.get("mappings", []):
+                  for rel in mapping.get("releases", []):
+                      if (
+                          rel.get("channel") == channel
+                          and rel.get("status") == "open"
+                          and rel.get("revision") is not None
+                      ):
+                          print(rel["revision"])
+                          sys.exit(0)
+          sys.exit(99)
+          PY
+          ) || {
+            echo "No open revision on $CHANNEL — publish a charm revision via release.yml first." >&2
+            exit 1
+          }
+          echo "Current charm revision on $CHANNEL: $REV"
+          echo "rev=$REV" >> "$GITHUB_OUTPUT"
+
+      - name: Re-release existing charm rev with new resource rev
+        shell: bash
+        env:
+          CHARMCRAFT_AUTH: ${{ secrets.CHARMHUB_TOKEN }}
+        run: |
+          charmcraft release "${{ steps.upload.outputs.charm }}" \
+            -r "${{ steps.currev.outputs.rev }}" \
+            --channel="${{ steps.chan.outputs.channel }}" \
+            --resource="${{ steps.upload.outputs.resource }}:${{ steps.upload.outputs.rev }}"
