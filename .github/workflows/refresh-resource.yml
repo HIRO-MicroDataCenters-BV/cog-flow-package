@@ -11,6 +11,12 @@ concurrency:
 jobs:
   refresh:
     runs-on: ubuntu-22.04
+    env:
+      # All client_payload fields go through env vars, never interpolated
+      # directly into shell — avoids shell injection from a crafted dispatch.
+      BRANCH: ${{ github.event.client_payload.branch }}
+      IMAGE:  ${{ github.event.client_payload.image }}
+      DIGEST: ${{ github.event.client_payload.digest }}
     steps:
       - name: Checkout
         uses: actions/checkout@v5
@@ -18,14 +24,33 @@ jobs:
       - name: Install charmcraft
         run: sudo snap install charmcraft --classic --channel 3.x/stable
 
+      - name: Validate payload
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -z "${BRANCH:-}" ] || [ -z "${IMAGE:-}" ]; then
+            echo "Missing required payload fields: branch, image" >&2
+            exit 1
+          fi
+          # Image allowlist — only accept images from our registry namespace.
+          case "$IMAGE" in
+            docker.io/hiroregistry/*|hiroregistry/*) : ;;
+            *)
+              echo "Refusing unexpected image: $IMAGE" >&2
+              echo "Expected prefix: (docker.io/)hiroregistry/..." >&2
+              exit 1
+              ;;
+          esac
+
       - name: Map branch to channel
         id: chan
         shell: bash
         run: |
-          case "${{ github.event.client_payload.branch }}" in
+          set -euo pipefail
+          case "$BRANCH" in
             main)    echo "channel=latest/stable" >> "$GITHUB_OUTPUT" ;;
             develop) echo "channel=latest/edge"   >> "$GITHUB_OUTPUT" ;;
-            *) echo "Unsupported branch: ${{ github.event.client_payload.branch }}" >&2; exit 1 ;;
+            *) echo "Unsupported branch: $BRANCH" >&2; exit 1 ;;
           esac
 
       - name: Pull image and resolve id
@@ -33,16 +58,18 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          IMAGE="${{ github.event.client_payload.image }}"
           echo "Pulling $IMAGE"
           docker pull "$IMAGE"
-          echo "id=$(docker inspect --format='{{.Id}}' "$IMAGE")" >> "$GITHUB_OUTPUT"
+          IMAGE_ID="$(docker inspect --format='{{.Id}}' "$IMAGE")"
+          echo "Image id: $IMAGE_ID"
+          echo "id=$IMAGE_ID" >> "$GITHUB_OUTPUT"
 
       - name: Upload resource revision
         id: upload
         shell: bash
         env:
           CHARMCRAFT_AUTH: ${{ secrets.CHARMHUB_TOKEN }}
+          IMAGE_ID: ${{ steps.img.outputs.id }}
         run: |
           set -euo pipefail
           python3 -m pip install --quiet pyyaml
@@ -64,7 +91,7 @@ jobs:
           echo "resource=$RES" >> "$GITHUB_OUTPUT"
 
           REV=$(charmcraft upload-resource "$CHARM" "$RES" \
-                  --image "${{ steps.img.outputs.id }}" --format=json \
+                  --image "$IMAGE_ID" --format=json \
                 | python3 -c 'import json,sys; print(json.load(sys.stdin)["revision"])')
           echo "resource $RES -> revision $REV"
           echo "rev=$REV" >> "$GITHUB_OUTPUT"
@@ -75,13 +102,20 @@ jobs:
         env:
           CHARMCRAFT_AUTH: ${{ secrets.CHARMHUB_TOKEN }}
           CHANNEL: ${{ steps.chan.outputs.channel }}
-          CHARM: ${{ steps.upload.outputs.charm }}
+          CHARM:   ${{ steps.upload.outputs.charm }}
         run: |
           set -euo pipefail
-          REV=$(charmcraft status "$CHARM" --format=json | python3 - <<'PY'
+          # Capture status JSON into an env var so the python script can
+          # read it; piping into 'python3 - <<EOF' would use the heredoc
+          # as stdin and drop the JSON.
+          STATUS_JSON=$(charmcraft status "$CHARM" --format=json)
+          export STATUS_JSON
+
+          set +e
+          REV=$(python3 -c '
           import json, os, sys
+          data = json.loads(os.environ["STATUS_JSON"])
           channel = os.environ["CHANNEL"]
-          data = json.load(sys.stdin)
           for track in data:
               for mapping in track.get("mappings", []):
                   for rel in mapping.get("releases", []):
@@ -93,11 +127,19 @@ jobs:
                           print(rel["revision"])
                           sys.exit(0)
           sys.exit(99)
-          PY
-          ) || {
+          ')
+          rc=$?
+          set -e
+
+          if [ "$rc" -eq 99 ]; then
             echo "No open revision on $CHANNEL — publish a charm revision via release.yml first." >&2
             exit 1
-          }
+          fi
+          if [ "$rc" -ne 0 ]; then
+            echo "Failed to resolve current revision on $CHANNEL (python exit $rc)" >&2
+            exit 1
+          fi
+
           echo "Current charm revision on $CHANNEL: $REV"
           echo "rev=$REV" >> "$GITHUB_OUTPUT"
 
@@ -105,8 +147,13 @@ jobs:
         shell: bash
         env:
           CHARMCRAFT_AUTH: ${{ secrets.CHARMHUB_TOKEN }}
+          CHARM:    ${{ steps.upload.outputs.charm }}
+          RESOURCE: ${{ steps.upload.outputs.resource }}
+          RES_REV:  ${{ steps.upload.outputs.rev }}
+          CHARM_REV: ${{ steps.currev.outputs.rev }}
+          CHANNEL:  ${{ steps.chan.outputs.channel }}
         run: |
-          charmcraft release "${{ steps.upload.outputs.charm }}" \
-            -r "${{ steps.currev.outputs.rev }}" \
-            --channel="${{ steps.chan.outputs.channel }}" \
-            --resource="${{ steps.upload.outputs.resource }}:${{ steps.upload.outputs.rev }}"
+          charmcraft release "$CHARM" \
+            -r "$CHARM_REV" \
+            --channel="$CHANNEL" \
+            --resource="$RESOURCE:$RES_REV"
