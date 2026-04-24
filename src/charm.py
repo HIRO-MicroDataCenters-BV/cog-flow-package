@@ -364,6 +364,10 @@ class FlowiseCharm(CharmBase):
     def _pebble_layer(self) -> LayerDict:
         """Return the Pebble layer configuration for Flowise."""
         port = self.config.get("port", FLOWISE_PORT)
+        # Strip trailing "/" so a config like "/flowise/" or "/" doesn't produce a
+        # double slash in the URL. "" stays as "" so probing collapses to /api/v1/ping.
+        base_path = self.config.get("base-path", FLOWISE_PREFIX.rstrip("/")).rstrip("/")
+        ping_url = f"http://localhost:{port}{base_path}/api/v1/ping"
         return {
             "summary": "Flowise AI layer",
             "description": "Pebble layer for the Flowise AI application",
@@ -386,7 +390,7 @@ class FlowiseCharm(CharmBase):
                     "period": "30s",
                     "timeout": "5s",
                     "http": {
-                        "url": f"http://localhost:{port}/api/v1/ping",
+                        "url": ping_url,
                     },
                 },
             },
