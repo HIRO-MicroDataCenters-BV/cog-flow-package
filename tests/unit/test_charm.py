@@ -118,13 +118,33 @@ class TestFlowiseCharm(unittest.TestCase):
         self.assertEqual(env["FLOWISE_PASSWORD"], "secret")
 
     def test_health_check_configured(self):
-        """Test that the Pebble health check is set up."""
+        """Default base-path (/flowise) must be reflected in the health-check URL."""
         self.harness.begin()
         layer = self.harness.charm._pebble_layer()
         self.assertIn("flowise-health", layer["checks"])
         self.assertEqual(
             layer["checks"]["flowise-health"]["http"]["url"],
+            "http://localhost:3000/flowise/api/v1/ping",
+        )
+
+    def test_health_check_empty_base_path(self):
+        """base-path='' collapses the probe to the bare /api/v1/ping."""
+        self.harness.update_config({"base-path": ""})
+        self.harness.begin()
+        layer = self.harness.charm._pebble_layer()
+        self.assertEqual(
+            layer["checks"]["flowise-health"]["http"]["url"],
             "http://localhost:3000/api/v1/ping",
+        )
+
+    def test_health_check_trailing_slash_normalized(self):
+        """A trailing slash on base-path must not produce a double-slash URL."""
+        self.harness.update_config({"base-path": "/flowise/"})
+        self.harness.begin()
+        layer = self.harness.charm._pebble_layer()
+        self.assertEqual(
+            layer["checks"]["flowise-health"]["http"]["url"],
+            "http://localhost:3000/flowise/api/v1/ping",
         )
 
     def test_ingress_relation_sends_data(self):
