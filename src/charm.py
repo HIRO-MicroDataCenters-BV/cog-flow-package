@@ -249,6 +249,39 @@ class FlowiseCharm(CharmBase):
             logger.warning("Error reading cog-api-info relation: %s", err)
             return ""
 
+    def _get_cog_api_url(self, base_path: str) -> str:
+        """Build the full Cog API URL by combining the K8s service hostname
+        of the related app with the given base-path.
+
+        Juju K8s charms expose each application as a same-named ClusterIP
+        service in the model's namespace, so http://<remote-app-name> resolves
+        from any pod in the model. Returns empty string if the relation is not
+        established or its remote app is unknown.
+
+        `base_path` is the value already read from the relation; passed in so
+        we don't re-read (and re-log) the relation data twice per event.
+        """
+        if not base_path:
+            return ""
+        relations = self.model.relations.get("cog-api-info", [])
+        if not relations:
+            return ""
+        # The relation is declared with no `limit`, but only one cog-api should
+        # ever be integrated. If more show up, prefer one with a known remote
+        # app and warn — picking relations[0] blindly would be non-deterministic.
+        if len(relations) > 1:
+            logger.warning(
+                "Multiple cog-api-info relations found (%d); using the first "
+                "one with a known remote app.",
+                len(relations),
+            )
+        relation = next((r for r in relations if r.app), None)
+        if relation is None:
+            return ""
+        # Ensure exactly one '/' between host and path.
+        normalized_path = "/" + base_path.lstrip("/")
+        return f"http://{relation.app.name}{normalized_path}"
+
     def _flowise_environment(self) -> dict:
         """Build the environment dict for the Flowise container.
 
@@ -345,10 +378,15 @@ class FlowiseCharm(CharmBase):
         if secret_key:
             env["SECRETKEY_OVERWRITE"] = secret_key
 
-        # --- Cog API path (from relation) ---
+        # --- Cog API location (from relation) ---
+        # COG_API_PATH is the legacy path-only value; COG_API_URL is the
+        # full URL used by the ChatOpenAI Custom node to discover served LLMs.
         cog_api_path = self._get_cog_api_path()
         if cog_api_path:
             env["COG_API_PATH"] = cog_api_path
+            cog_api_url = self._get_cog_api_url(cog_api_path)
+            if cog_api_url:
+                env["COG_API_URL"] = cog_api_url
 
         # --- Parse extra-env (newline-separated KEY=VALUE pairs) ---
         extra = self.config.get("extra-env", "")

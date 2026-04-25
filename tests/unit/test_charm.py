@@ -147,6 +147,52 @@ class TestFlowiseCharm(unittest.TestCase):
             "http://localhost:3000/flowise/api/v1/ping",
         )
 
+    def _set_cog_api_relation(self, base_path: str, remote_app: str = "cog-api"):
+        """Helper: stand up a cog-api-info relation with a base-path payload.
+
+        Mirrors the shape returned by serialized_data_interface so
+        _get_cog_api_path()/_get_cog_api_url() resolve to real values.
+        """
+        mock_iface = MagicMock()
+        mock_iface.get_data.return_value = {("rel", "app"): {"base-path": base_path}}
+        mock_sdi.get_interfaces.return_value = {"cog-api-info": mock_iface}
+        rid = self.harness.add_relation("cog-api-info", remote_app)
+        self.harness.add_relation_unit(rid, f"{remote_app}/0")
+        return rid
+
+    def test_cog_api_env_present_when_related(self):
+        """Both COG_API_PATH and COG_API_URL land in the env once the relation is up."""
+        self.harness.begin()
+        self.harness.charm._get_database_config = MagicMock(return_value={})
+        self.harness.charm._get_s3_config = MagicMock(return_value={})
+        self.harness.charm._get_redis_config = MagicMock(return_value={})
+        self._set_cog_api_relation("/cogapi", remote_app="cog-api")
+        env = self.harness.charm._flowise_environment()
+        self.assertEqual(env.get("COG_API_PATH"), "/cogapi")
+        self.assertEqual(env.get("COG_API_URL"), "http://cog-api/cogapi")
+
+    def test_cog_api_env_absent_without_relation(self):
+        """Without the relation, neither key appears (no stale value)."""
+        self.harness.begin()
+        self.harness.charm._get_database_config = MagicMock(return_value={})
+        self.harness.charm._get_s3_config = MagicMock(return_value={})
+        self.harness.charm._get_redis_config = MagicMock(return_value={})
+        mock_sdi.get_interfaces.return_value = {}
+        env = self.harness.charm._flowise_environment()
+        self.assertNotIn("COG_API_PATH", env)
+        self.assertNotIn("COG_API_URL", env)
+
+    def test_cog_api_url_normalizes_missing_leading_slash(self):
+        """If the relation ever sends a base-path without a leading slash,
+        the URL still has exactly one slash between host and path."""
+        self.harness.begin()
+        self.harness.charm._get_database_config = MagicMock(return_value={})
+        self.harness.charm._get_s3_config = MagicMock(return_value={})
+        self.harness.charm._get_redis_config = MagicMock(return_value={})
+        self._set_cog_api_relation("cogapi", remote_app="cog-api")
+        env = self.harness.charm._flowise_environment()
+        self.assertEqual(env.get("COG_API_URL"), "http://cog-api/cogapi")
+
     def test_ingress_relation_sends_data(self):
         """Test that ingress relation sends correct routing data."""
         # Set up mock ingress interface
