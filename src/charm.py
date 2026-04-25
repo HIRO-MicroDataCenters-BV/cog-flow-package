@@ -249,6 +249,26 @@ class FlowiseCharm(CharmBase):
             logger.warning("Error reading cog-api-info relation: %s", err)
             return ""
 
+    def _get_cog_api_url(self) -> str:
+        """Build the full Cog API URL by combining the K8s service hostname
+        of the related app with its base-path.
+
+        Juju K8s charms expose each application as a same-named ClusterIP
+        service in the model's namespace, so http://<remote-app-name> resolves
+        from any pod in the model. Returns empty string if the relation is not
+        established or the base-path is not yet available.
+        """
+        relations = self.model.relations.get("cog-api-info", [])
+        if not relations:
+            return ""
+        relation = relations[0]
+        if not relation.app:
+            return ""
+        base_path = self._get_cog_api_path()
+        if not base_path:
+            return ""
+        return f"http://{relation.app.name}{base_path}"
+
     def _flowise_environment(self) -> dict:
         """Build the environment dict for the Flowise container.
 
@@ -345,10 +365,15 @@ class FlowiseCharm(CharmBase):
         if secret_key:
             env["SECRETKEY_OVERWRITE"] = secret_key
 
-        # --- Cog API path (from relation) ---
+        # --- Cog API location (from relation) ---
+        # COG_API_PATH is the legacy path-only value; COG_API_URL is the
+        # full URL used by the ChatOpenAI Custom node to discover served LLMs.
         cog_api_path = self._get_cog_api_path()
         if cog_api_path:
             env["COG_API_PATH"] = cog_api_path
+        cog_api_url = self._get_cog_api_url()
+        if cog_api_url:
+            env["COG_API_URL"] = cog_api_url
 
         # --- Parse extra-env (newline-separated KEY=VALUE pairs) ---
         extra = self.config.get("extra-env", "")
