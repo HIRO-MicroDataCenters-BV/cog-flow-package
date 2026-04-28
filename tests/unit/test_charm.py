@@ -117,6 +117,59 @@ class TestFlowiseCharm(unittest.TestCase):
         self.assertEqual(env["FLOWISE_USERNAME"], "admin")
         self.assertEqual(env["FLOWISE_PASSWORD"], "secret")
 
+    def test_secretkey_overwrite_uses_flowise_prefix(self):
+        """flowise-secretkey-overwrite must land in the env as the
+        prefixed name Flowise actually reads, not the unprefixed one."""
+        self.harness.begin()
+        self.harness.update_config({"flowise-secretkey-overwrite": "abc123"})
+        env = self.harness.charm._flowise_environment()
+        self.assertEqual(env.get("FLOWISE_SECRETKEY_OVERWRITE"), "abc123")
+        self.assertNotIn("SECRETKEY_OVERWRITE", env)
+
+    def test_secretkey_overwrite_absent_when_unset(self):
+        """Empty config must not inject any secret-key env var; Flowise
+        falls through to its file-on-PVC fallback in that case."""
+        self.harness.begin()
+        env = self.harness.charm._flowise_environment()
+        self.assertNotIn("FLOWISE_SECRETKEY_OVERWRITE", env)
+        self.assertNotIn("SECRETKEY_OVERWRITE", env)
+
+    def test_secretkey_overwrite_warning_emitted_once(self):
+        """Empty config logs a warning, but only once per charm process —
+        _flowise_environment() runs on most events, so an unguarded log
+        would flood juju-log."""
+        self.harness.begin()
+        # First call: warning fires.
+        with self.assertLogs("charm", level="WARNING") as cm:
+            self.harness.charm._flowise_environment()
+        self.assertTrue(any("flowise-secretkey-overwrite is empty" in line for line in cm.output))
+        # Second call: no new warning (latch holds).
+        with self.assertLogs("charm", level="WARNING") as cm2:
+            # assertLogs requires *something* to be logged or it raises;
+            # emit a dummy WARNING so this block has a record to capture
+            # and we can prove our warning didn't add to it.
+            import logging
+            logging.getLogger("charm").warning("dummy")
+            self.harness.charm._flowise_environment()
+        self.assertEqual(
+            sum(1 for line in cm2.output if "flowise-secretkey-overwrite is empty" in line),
+            0,
+        )
+
+    def test_secretkey_overwrite_warning_relatches_after_set_then_unset(self):
+        """When the operator sets the value and later clears it, the
+        warning should fire again on the cleared event so the operator
+        sees the risk again."""
+        self.harness.begin()
+        # Set → warning latched off (and never fired since value was non-empty).
+        self.harness.update_config({"flowise-secretkey-overwrite": "abc"})
+        self.harness.charm._flowise_environment()
+        # Clear → warning should fire again on the next env build.
+        self.harness.update_config({"flowise-secretkey-overwrite": ""})
+        with self.assertLogs("charm", level="WARNING") as cm:
+            self.harness.charm._flowise_environment()
+        self.assertTrue(any("flowise-secretkey-overwrite is empty" in line for line in cm.output))
+
     def test_health_check_configured(self):
         """Default base-path (/flowise) must be reflected in the health-check URL."""
         self.harness.begin()

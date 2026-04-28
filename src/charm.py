@@ -102,6 +102,12 @@ class FlowiseCharm(CharmBase):
         # --- Cog API info relation events ---
         self.framework.observe(self.on.cog_api_info_relation_changed, self._on_cog_api_info_changed)
 
+        # _flowise_environment() is invoked on every event (pebble-ready,
+        # config-changed, upgrade-charm, every relation hook). Guard the
+        # missing-secret-key warning behind a per-process flag so it doesn't
+        # flood juju-log on a relation-busy unit.
+        self._secret_key_warning_logged = False
+
     # -----------------------------------------------------------------
     # Helpers
     # -----------------------------------------------------------------
@@ -385,13 +391,17 @@ class FlowiseCharm(CharmBase):
         secret_key = self.config.get("flowise-secretkey-overwrite", "")
         if secret_key:
             env["FLOWISE_SECRETKEY_OVERWRITE"] = secret_key
-        else:
+            # Reset the latch so that, if the operator later clears the value,
+            # the warning fires again.
+            self._secret_key_warning_logged = False
+        elif not self._secret_key_warning_logged:
             logger.warning(
                 "flowise-secretkey-overwrite is empty; Flowise will generate "
                 "a random encryption key and persist it to the PVC. If the PVC "
                 "is ever recreated, all stored credentials become unreadable. "
                 "Set this config option to a stable value for production."
             )
+            self._secret_key_warning_logged = True
 
         # --- Cog API location (from relation) ---
         # COG_API_PATH is the legacy path-only value; COG_API_URL is the
