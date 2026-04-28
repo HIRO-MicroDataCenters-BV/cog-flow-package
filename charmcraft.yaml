@@ -102,7 +102,13 @@ config:
       default: ""
       description: |
         Secret key used to encrypt/decrypt credentials stored in the database.
-        If not set, Flowise generates a random one (lost on restart).
+        Strongly recommended for production: when unset, Flowise generates a
+        random key and persists it to the PVC at /root/.flowise/encryption.key.
+        If that file is ever lost — PVC recreated, init-container that wipes
+        the dir, manual cleanup — Flowise generates a new random key and ALL
+        existing credentials become un-decryptable (effectively "data lost").
+        Set this to a stable value to keep credentials decryptable across
+        any PVC events.
     log-level:
       type: string
       default: info

@@ -374,9 +374,24 @@ class FlowiseCharm(CharmBase):
             env["FLOWISE_USERNAME"] = username
             env["FLOWISE_PASSWORD"] = password
 
+        # Flowise reads FLOWISE_SECRETKEY_OVERWRITE (with the FLOWISE_ prefix)
+        # in packages/server/src/utils/index.ts; the unprefixed SECRETKEY_OVERWRITE
+        # was being silently ignored. When this is unset, Flowise falls back to a
+        # randomly generated key persisted to ${SECRETKEY_PATH}/encryption.key on
+        # the PVC — credentials become unreadable if that file is ever lost
+        # (PVC recreated, init-container that wipes the dir, etc.). Setting this
+        # env explicitly is the only way to survive PVC churn without losing
+        # credentials.
         secret_key = self.config.get("flowise-secretkey-overwrite", "")
         if secret_key:
-            env["SECRETKEY_OVERWRITE"] = secret_key
+            env["FLOWISE_SECRETKEY_OVERWRITE"] = secret_key
+        else:
+            logger.warning(
+                "flowise-secretkey-overwrite is empty; Flowise will generate "
+                "a random encryption key and persist it to the PVC. If the PVC "
+                "is ever recreated, all stored credentials become unreadable. "
+                "Set this config option to a stable value for production."
+            )
 
         # --- Cog API location (from relation) ---
         # COG_API_PATH is the legacy path-only value; COG_API_URL is the
