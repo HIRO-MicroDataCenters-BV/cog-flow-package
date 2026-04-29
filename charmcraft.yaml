@@ -26,6 +26,13 @@ bases:
 containers:
   flowise:
     resource: oci-image
+    # Mount the PVC into the workload container — without this, Juju only
+    # binds the storage to the charm sidecar and Flowise writes to the
+    # container's overlay layer, which is wiped on every restart (saved
+    # chatflows, encryption.key, credentials all gone).
+    mounts:
+      - storage: flowise-data
+        location: /root/.flowise
 
 resources:
   oci-image:
