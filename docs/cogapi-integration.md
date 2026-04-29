@@ -184,5 +184,5 @@ cache.
   `kubeflow-userid` header.
 - `packages/server/src/enterprise/middleware/passport/index.ts:auth/resolve`
   — `TRUSTED_AUTH_HEADER` auto-login.
-- `cog-flow-package/src/charm.py:_get_cog_api_url` — composes
-  `COG_API_URL` env from the relation.
+- `src/charm.py:_get_cog_api_url` — composes `COG_API_URL` env from
+  the relation.
