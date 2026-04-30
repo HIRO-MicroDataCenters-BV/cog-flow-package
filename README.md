@@ -109,6 +109,16 @@ This automatically creates the Istio VirtualService that routes `/flowise/` to t
 kubectl apply -f k8s-manifests.yaml -n kubeflow
 ```
 
+**Optional — Iframe-safe oidc cookies:**
+
+If you embed Flowise (or any other Kubeflow app) in the Central Dashboard's iframe and observe sessions getting damaged on first load, apply this platform-level EnvoyFilter to make oidc-authservice's cookies iframe-friendly (`SameSite=None; Secure; Partitioned; HttpOnly`):
+
+```bash
+kubectl apply -f oidc-cookie-iframe-rewrite.yaml
+```
+
+The file's header comment explains the failure mode, the trade-offs, and how to verify. Apply only if you've confirmed the symptom in DevTools.
+
 ### 5. (Optional) Add database backend
 
 By default, Flowise uses SQLite stored in the PVC. For production, use MySQL or PostgreSQL:
@@ -211,7 +221,8 @@ flowise-charm/
 ├── charmcraft.yaml          # Charm project definition
 ├── metadata.yaml            # Charm metadata (relations, resources, storage)
 ├── requirements.txt         # Python dependencies
-├── k8s-manifests.yaml       # Manual Istio routing manifests
+├── k8s-manifests.yaml                # Manual Istio routing manifests
+├── oidc-cookie-iframe-rewrite.yaml   # Optional: iframe-safe oidc cookies
 ├── src/
 │   └── charm.py             # Main operator logic
 └── lib/

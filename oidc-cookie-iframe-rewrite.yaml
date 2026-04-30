@@ -1,0 +1,150 @@
+# Optional platform-level EnvoyFilter: rewrite oidc-authservice Set-Cookie
+# headers to be iframe-safe.
+#
+# Why
+# ---
+# Kubeflow's oidc-authservice (deployed by the `oidc-gatekeeper` charm) sets
+# the `authservice_session` and `oidc_state_csrf` cookies without `SameSite`,
+# `Secure`, `HttpOnly`, or `Partitioned` attributes. Modern Chromium then
+# treats them as `SameSite=Lax` by default, and strips them on unsafe-method
+# (POST/PUT/DELETE) requests originating from nested browsing contexts
+# (iframes) — even when the request is same-origin to the iframe's parent.
+#
+# Symptom: the Kubeflow Central Dashboard embeds apps in an iframe (when
+# `DASHBOARD_FORCE_IFRAME: true` is set in `centraldashboard-config`). Any
+# such app whose first-load auth flow makes an iframe-initiated POST against
+# an oidc-protected URL ends up without `authservice_session` on that
+# request, gets bounced through `/dex/auth`, and (depending on the app's
+# error handling) shows a blank page or breaks the user's existing Kubeflow
+# session.
+#
+# This filter appends `SameSite=None; Secure; Partitioned; HttpOnly` to the
+# two oidc-authservice cookies on the way out of the gateway. With those
+# attributes:
+#  - `SameSite=None; Secure` opts out of Chrome's same-site enforcement and
+#    opts into cross-site contexts (required for iframe-embedded apps).
+#  - `Partitioned` is the CHIPS attribute Chrome reads to scope the cookie
+#    per top-level site, restoring privacy guarantees we'd otherwise drop.
+#  - `HttpOnly` plugs an existing security gap (today the cookie is
+#    JS-readable from any document on the same origin).
+#
+# Idempotent guard: the Lua snippet only appends attributes when the
+# original Set-Cookie does NOT already contain `samesite`. If
+# oidc-authservice is later patched upstream to set these attributes
+# natively, this filter becomes a no-op without any change here.
+#
+# Scope
+# -----
+# Applies at the istio-ingressgateway, runs only on responses, and matches
+# only the two oidc-authservice cookie names. Other Set-Cookie headers (and
+# all non-Set-Cookie traffic) pass through unchanged. Single-string-match
+# overhead per response.
+#
+# Usage
+# -----
+# 1. Apply: `kubectl apply -f oidc-cookie-iframe-rewrite.yaml`
+# 2. Verify in DevTools: the next response that sets `authservice_session`
+#    or `oidc_state_csrf` should now show `SameSite=None; Secure;
+#    Partitioned; HttpOnly` in the Set-Cookie header.
+# 3. Existing user sessions: cookies the browser already has are unaffected
+#    (their attributes were set when the cookie was issued). Users get the
+#    new attributes the next time their session refreshes — typically on
+#    next login or when oidc-authservice rotates the session.
+#
+# Trade-offs
+# ----------
+# - Pro: single YAML, no charm rebuild, no oidc-authservice upstream change,
+#   no forced re-login.
+# - Con: header rewriting at the proxy is fragile to upstream changes in
+#   the cookie format. If oidc-authservice ever changes its cookie names or
+#   the way it serializes Set-Cookie, this filter must be updated.
+#
+# Apply only if you're seeing iframe-embedded Kubeflow apps lose
+# `authservice_session` on cross-frame requests — check `Set-Cookie` on the
+# OAuth callback response with DevTools first.
+---
+apiVersion: networking.istio.io/v1alpha3
+kind: EnvoyFilter
+metadata:
+  name: oidc-cookie-iframe-rewrite
+  namespace: kubeflow
+spec:
+  workloadSelector:
+    labels:
+      istio: ingressgateway
+  configPatches:
+    - applyTo: HTTP_FILTER
+      match:
+        context: GATEWAY
+        listener:
+          filterChain:
+            filter:
+              name: envoy.filters.network.http_connection_manager
+          portNumber: 8080
+      patch:
+        operation: INSERT_AFTER
+        value:
+          name: envoy.filters.http.lua.oidc_cookie_iframe_rewrite
+          typed_config:
+            "@type": type.googleapis.com/envoy.extensions.filters.http.lua.v3.Lua
+            inline_code: |
+              -- Rewrite oidc-authservice Set-Cookie headers so the cookies
+              -- ride iframe-embedded Kubeflow apps. See accompanying YAML
+              -- comment block for full rationale.
+              function envoy_on_response(response_handle)
+                local headers = response_handle:headers()
+                local kept = {}
+                for key, value in pairs(headers) do
+                  if string.lower(key) == "set-cookie" then
+                    local name = value:match("^([%w%-_]+)=")
+                    if name == "authservice_session" or name == "oidc_state_csrf" then
+                      if not value:lower():find("samesite") then
+                        value = value .. "; SameSite=None; Secure; Partitioned; HttpOnly"
+                      end
+                    end
+                    table.insert(kept, value)
+                  end
+                end
+                if #kept > 0 then
+                  headers:remove("set-cookie")
+                  for _, v in ipairs(kept) do
+                    headers:add("set-cookie", v)
+                  end
+                end
+              end
+    - applyTo: HTTP_FILTER
+      match:
+        context: GATEWAY
+        listener:
+          filterChain:
+            filter:
+              name: envoy.filters.network.http_connection_manager
+          portNumber: 8443
+      patch:
+        operation: INSERT_AFTER
+        value:
+          name: envoy.filters.http.lua.oidc_cookie_iframe_rewrite
+          typed_config:
+            "@type": type.googleapis.com/envoy.extensions.filters.http.lua.v3.Lua
+            inline_code: |
+              function envoy_on_response(response_handle)
+                local headers = response_handle:headers()
+                local kept = {}
+                for key, value in pairs(headers) do
+                  if string.lower(key) == "set-cookie" then
+                    local name = value:match("^([%w%-_]+)=")
+                    if name == "authservice_session" or name == "oidc_state_csrf" then
+                      if not value:lower():find("samesite") then
+                        value = value .. "; SameSite=None; Secure; Partitioned; HttpOnly"
+                      end
+                    end
+                    table.insert(kept, value)
+                  end
+                end
+                if #kept > 0 then
+                  headers:remove("set-cookie")
+                  for _, v in ipairs(kept) do
+                    headers:add("set-cookie", v)
+                  end
+                end
+              end
